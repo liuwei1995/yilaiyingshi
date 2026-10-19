@@ -1,0 +1,29 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;650;700&display=swap');
+
+:root {
+  --paper: #f8f8f2;
+  --ink: #262820;
+  --muted: #85867c;
+  --line: #e5e5dc;
+  --lime: #d8ed71;
+  --lime-strong: #afc440;
+  --coral: #d56d51;
+  --mono: 'DM Mono', 'SFMono-Regular', Consolas, monospace;
+  --sans: 'Manrope', 'Avenir Next', sans-serif;
+  font-family: var(--sans);
+  color: var(--ink);
+  background: var(--paper);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-optical-sizing: auto;
+}
+
+* { box-sizing: border-box; }
+html { min-width: 320px; min-height: 100%; scroll-behavior: smooth; }
+body { min-width: 320px; min-height: 100vh; margin: 0; }
+button, input, select { font: inherit; }
+button { border: 0; padding: 0; color: inherit; background: none; cursor: pointer; }
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid #78843e; outline-offset: 3px; }
+::selection { color: var(--ink); background: #e1edac; }
