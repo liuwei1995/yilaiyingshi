@@ -2,8 +2,21 @@ import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
 import { VitePWA } from 'vite-plugin-pwa'
 
+const forwardedHost = process.env.CODESPACE_NAME && process.env.GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN
+  ? `${process.env.CODESPACE_NAME}-5173.${process.env.GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN}`
+  : undefined
+
 // https://vite.dev/config/
 export default defineConfig({
+  server: {
+    allowedHosts: forwardedHost ? [forwardedHost] : [],
+    proxy: {
+      '/api.php': {
+        target: 'http://frp.xinaliu.com',
+        changeOrigin: true,
+      },
+    },
+  },
   plugins: [
     react(),
     VitePWA({

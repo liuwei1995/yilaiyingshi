@@ -1,77 +1,137 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import type Hls from 'hls.js'
 import {
-  Check, CircleHelp, Clapperboard, Clock3, ExternalLink, FileVideo2, Film,
-  ListVideo, LoaderCircle, Plus, Radio, Search, ShieldCheck, Trash2, Upload, X,
+  ArrowDownWideNarrow, Clapperboard, Film, LoaderCircle, Play,
+  Search, SlidersHorizontal, Sparkles, Star, X,
 } from 'lucide-react'
+import { fetchCategories, fetchVodDetail, fetchVodPage } from './api'
+import type { VodCategory, VodDetail, VodListItem, VodPlaySource } from './api'
 import './App.css'
 
-type MediaItem = { id: string; title: string; url: string; source: 'url' | 'file' }
+type FilterKey = 'area' | 'year' | 'class' | 'lang'
+type Episode = { id: string; name: string; url: string }
+type EpisodeSource = { name: string; episodes: Episode[] }
 
-const storageKey = 'frame-player-playlist-v1'
-const demoStream = 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8'
-const isHls = (url: string) => /\.m3u8(?:$|[?#])/i.test(url)
+const filterFields: { key: FilterKey; label: string }[] = [
+  { key: 'class', label: '类型' },
+  { key: 'area', label: '地区' },
+  { key: 'year', label: '年份' },
+  { key: 'lang', label: '语言' },
+]
 
-function readPlaylist(): MediaItem[] {
-  try {
-    const value = localStorage.getItem(storageKey)
-    if (!value) return []
-    const items = JSON.parse(value) as MediaItem[]
-    return Array.isArray(items) ? items.filter((item) => item.source === 'url' && item.url) : []
-  } catch {
-    return []
-  }
+function splitEpisodes(value: string, sourceIndex: number): Episode[] {
+  return value.split('#').flatMap((entry, index) => {
+    const separator = entry.indexOf('$')
+    if (separator < 0) return []
+    const name = entry.slice(0, separator).trim()
+    const url = entry.slice(separator + 1).trim()
+    if (!url || !/^https?:\/\//i.test(url)) return []
+    return [{ id: `${sourceIndex}-${index}`, name: name || `第 ${index + 1} 集`, url }]
+  })
 }
 
-function titleFromUrl(value: string) {
-  try {
-    const url = new URL(value)
-    return decodeURIComponent(url.pathname.split('/').filter(Boolean).pop() || url.hostname)
-  } catch {
-    return value
-  }
+function getEpisodeSources(detail: VodDetail): EpisodeSource[] {
+  const structuredSources = (detail.vod_play_list || []) as VodPlaySource[]
+  const sources = structuredSources.length
+    ? structuredSources.map((source) => ({ name: source.player_info?.show || source.from || '播放源', url: source.url || '' }))
+    : (detail.vod_play_url || '').split('$$$').map((url, index) => ({
+      name: (detail.vod_play_from || '').split('$$$')[index] || `播放源 ${index + 1}`,
+      url,
+    }))
+
+  return sources
+    .map((source, index) => ({ name: source.name, episodes: splitEpisodes(source.url, index) }))
+    .filter((source) => source.episodes.length > 0)
+}
+
+function getFilterOptions(category: VodCategory | undefined, key: FilterKey) {
+  const values = category?.type_extend?.[key]
+  return values ? values.split(/[,，]/).map((value) => value.trim()).filter(Boolean) : []
+}
+
+function plainText(value: string) {
+  return new DOMParser().parseFromString(value, 'text/html').body.textContent?.trim() || ''
 }
 
 function App() {
-  const videoRef = useRef<HTMLVideoElement>(null)
-  const fileInputRef = useRef<HTMLInputElement>(null)
-  const [playlist, setPlaylist] = useState<MediaItem[]>(readPlaylist)
-  const [activeId, setActiveId] = useState<string | null>(null)
-  const [urlInput, setUrlInput] = useState('')
-  const [filter, setFilter] = useState('')
-  const [error, setError] = useState('')
-  const [isReady, setIsReady] = useState(false)
-  const [copied, setCopied] = useState(false)
+  const [categories, setCategories] = useState<VodCategory[]>([])
+  const [categoryError, setCategoryError] = useState('')
+  const [selectedType, setSelectedType] = useState('')
+  const [keyword, setKeyword] = useState('')
+  const [query, setQuery] = useState('')
+  const [filters, setFilters] = useState<Partial<Record<FilterKey, string>>>({})
+  const [videos, setVideos] = useState<VodListItem[]>([])
+  const [total, setTotal] = useState(0)
+  const [page, setPage] = useState(1)
+  const [sortBy, setSortBy] = useState<'latest' | 'score'>('latest')
+  const [hasMore, setHasMore] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [listError, setListError] = useState('')
+  const [selectedVodId, setSelectedVodId] = useState<string | number | null>(null)
+  const [detail, setDetail] = useState<VodDetail | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
+  const [detailError, setDetailError] = useState('')
+  const [selectedSource, setSelectedSource] = useState(0)
+  const [playing, setPlaying] = useState<Episode | null>(null)
+  const [playerError, setPlayerError] = useState('')
+  const [playerReady, setPlayerReady] = useState(false)
   const [speed, setSpeed] = useState('1')
-  const activeItem = playlist.find((item) => item.id === activeId) ?? null
-  const visiblePlaylist = playlist.filter((item) => item.title.toLowerCase().includes(filter.toLowerCase()))
+
+  const selectedCategory = categories.find((category) => String(category.type_id) === selectedType)
+  const episodeSources = detail ? getEpisodeSources(detail) : []
+  const currentEpisodes = episodeSources[selectedSource]?.episodes ?? []
+  const hasActiveFilters = Object.values(filters).some(Boolean)
+  const sortedVideos = [...videos].sort((left, right) => sortBy === 'score'
+    ? Number(right.vod_score || 0) - Number(left.vod_score || 0)
+    : Number(right.vod_time || 0) - Number(left.vod_time || 0))
 
   useEffect(() => {
-    try {
-      localStorage.setItem(storageKey, JSON.stringify(playlist.filter((item) => item.source === 'url')))
-    } catch (storageError) {
-      console.warn('播放列表无法保存到浏览器存储。', storageError)
-    }
-  }, [playlist])
+    const controller = new AbortController()
+    void fetchCategories(controller.signal)
+      .then(setCategories)
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted) setCategoryError(error instanceof Error ? error.message : '分类加载失败')
+      })
+    return () => controller.abort()
+  }, [])
 
   useEffect(() => {
-    const video = videoRef.current
-    if (!video || !activeItem) {
-      setIsReady(false)
-      return
-    }
+    const timer = window.setTimeout(() => setQuery(keyword.trim()), 280)
+    return () => window.clearTimeout(timer)
+  }, [keyword])
 
-    setError('')
-    setIsReady(false)
-    const cleanupVideo = () => {
+  useEffect(() => {
+    const controller = new AbortController()
+    void fetchVodPage(selectedType, query, page, filters, controller.signal)
+      .then((result) => {
+        setVideos((current) => page === 1 ? result.list : [...current, ...result.list])
+        setTotal(result.total)
+        setHasMore(result.list.length >= result.limit && result.list.length > 0)
+        setListError('')
+        setLoading(false)
+      })
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted) {
+          setListError(error instanceof Error ? error.message : '影视列表加载失败')
+          setLoading(false)
+        }
+      })
+    return () => controller.abort()
+  }, [selectedType, query, page, filters])
+
+  useEffect(() => {
+    const video = document.querySelector<HTMLVideoElement>('#detail-player')
+    if (!video || !playing) return
+
+    const clearSource = () => {
       video.pause()
       video.removeAttribute('src')
       video.load()
     }
 
-    if (!isHls(activeItem.url)) {
-      video.src = activeItem.url
-      return cleanupVideo
+    if (!/\.m3u8(?:$|[?#])/i.test(playing.url)) {
+      video.src = playing.url
+      return clearSource
     }
 
     let hls: Hls | undefined
@@ -81,209 +141,233 @@ function App() {
       if (HlsPlayer.isSupported()) {
         const player = new HlsPlayer({ enableWorker: true })
         hls = player
-        player.loadSource(activeItem.url)
+        player.loadSource(playing.url)
         player.attachMedia(video)
-        player.on(HlsPlayer.Events.MANIFEST_PARSED, () => setIsReady(true))
+        player.on(HlsPlayer.Events.MANIFEST_PARSED, () => setPlayerReady(true))
         player.on(HlsPlayer.Events.ERROR, (_event, data) => {
-          if (!data.fatal) return
-          if (data.type === HlsPlayer.ErrorTypes.NETWORK_ERROR) {
-            setError('无法载入播放列表。请检查链接、网络和服务器 CORS 设置。')
-          } else if (data.type === HlsPlayer.ErrorTypes.MEDIA_ERROR) {
-            setError('视频编码不受支持，或媒体数据已损坏。')
-          } else {
-            setError('HLS 播放失败，请确认播放地址可访问。')
-          }
+          if (data.fatal) setPlayerError('播放流加载失败，请尝试其他线路。')
         })
       } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-        video.src = activeItem.url
+        video.src = playing.url
       } else {
-        setError('此浏览器不支持 HLS 播放。')
+        setPlayerError('此设备暂不支持 HLS 播放。')
       }
     }).catch(() => {
-      if (!cancelled) setError('HLS 播放模块加载失败，请刷新后重试。')
+      if (!cancelled) setPlayerError('播放模块加载失败，请重试。')
     })
 
     return () => {
       cancelled = true
       hls?.destroy()
-      cleanupVideo()
+      clearSource()
     }
-  }, [activeItem])
+  }, [playing])
 
   useEffect(() => {
-    if (videoRef.current) videoRef.current.playbackRate = Number(speed)
+    const video = document.querySelector<HTMLVideoElement>('#detail-player')
+    if (video) video.playbackRate = Number(speed)
   }, [speed])
 
-  function addUrl(value = urlInput) {
-    let parsed: URL
-    try {
-      parsed = new URL(value.trim())
-    } catch {
-      setError('请输入有效的 http 或 https 播放地址。')
-      return
-    }
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      setError('仅支持 http 或 https 播放地址。')
-      return
-    }
-    const existing = playlist.find((item) => item.url === parsed.href)
-    if (existing) {
-      setActiveId(existing.id)
-    } else {
-      const item: MediaItem = {
-        id: crypto.randomUUID(), title: titleFromUrl(parsed.href), url: parsed.href, source: 'url',
-      }
-      setPlaylist((items) => [item, ...items])
-      setActiveId(item.id)
-    }
-    setUrlInput('')
-    setError('')
+  function changeCategory(typeId: string) {
+    setSelectedType(typeId)
+    setFilters({})
+    setVideos([])
+    setPage(1)
+    setLoading(true)
   }
 
-  function addFile(file?: File) {
-    if (!file) return
-    if (!file.type.startsWith('video/')) {
-      setError('请选择浏览器支持的视频文件。')
-      return
-    }
-    const item: MediaItem = {
-      id: crypto.randomUUID(), title: file.name, url: URL.createObjectURL(file), source: 'file',
-    }
-    setPlaylist((items) => [item, ...items])
-    setActiveId(item.id)
-    setError('')
+  function changeFilter(key: FilterKey, value: string) {
+    setFilters((current) => ({ ...current, [key]: value }))
+    setVideos([])
+    setPage(1)
+    setLoading(true)
   }
 
-  function removeItem(item: MediaItem) {
-    if (item.source === 'file') URL.revokeObjectURL(item.url)
-    setPlaylist((items) => items.filter(({ id }) => id !== item.id))
-    if (activeId === item.id) setActiveId(null)
+  function submitSearch(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setQuery(keyword.trim())
+    setVideos([])
+    setPage(1)
+    setLoading(true)
   }
 
-  async function copyActiveUrl() {
-    if (!activeItem) return
-    try {
-      await navigator.clipboard.writeText(activeItem.url)
-      setCopied(true)
-      window.setTimeout(() => setCopied(false), 1600)
-    } catch {
-      setError('复制失败，请检查浏览器剪贴板权限。')
-    }
+  function openDetail(video: VodListItem) {
+    setSelectedVodId(video.vod_id)
+    setDetail(null)
+    setDetailError('')
+    setDetailLoading(true)
+    setPlaying(null)
+    setPlayerError('')
+    setPlayerReady(false)
+    setSelectedSource(0)
+    void fetchVodDetail(video.vod_id)
+      .then(setDetail)
+      .catch((error: unknown) => setDetailError(error instanceof Error ? error.message : '详情加载失败'))
+      .finally(() => setDetailLoading(false))
+  }
+
+  function closeDetail() {
+    setSelectedVodId(null)
+    setPlaying(null)
+    setPlayerReady(false)
+    setPlayerError('')
+  }
+
+  function playEpisode(episode: Episode) {
+    setPlayerReady(false)
+    setPlayerError('')
+    setPlaying(episode)
+  }
+
+  function loadMore() {
+    setLoading(true)
+    setPage((current) => current + 1)
   }
 
   return (
     <div className="app-shell">
       <header className="topbar">
-        <a className="brand" href="#home" aria-label="Frame 播放器首页">
+        <a className="brand" href="#home" aria-label="Frame 影视首页">
           <span className="brand-mark"><Clapperboard size={19} strokeWidth={2.1} /></span>
           <span className="brand-name">FRAME<span>/</span>PLAY</span>
         </a>
-        <div className="topbar-meta">
-          <span className="platform-badge"><span className="live-dot" /> LOCAL PLAYER</span>
-          <a className="help-link" href="#player-help" aria-label="播放帮助" title="播放帮助"><CircleHelp size={17} /></a>
-        </div>
+        <span className="platform-badge"><span className="live-dot" /> VIDEO LIBRARY</span>
       </header>
 
-      <main className="studio" id="home">
-        <section className="viewer-column" aria-label="视频播放器">
-          <div className="section-heading">
-            <div><div className="eyebrow">PLAYBACK DESK <span>01 / LIVE</span></div><h1>视频播放器</h1></div>
-            <div className="format-tags"><span>HLS</span><span>MP4</span><span>WEBM</span></div>
+      <main className="library" id="home">
+        <section className="library-intro">
+          <div className="intro-copy">
+            <div className="eyebrow"><Sparkles size={13} /> YOUR NEXT WATCH <span>01 / DISCOVER</span></div>
+            <h1>把好片，<span>放进今晚。</span></h1>
+            <p>从分类开始，找到想看的那一部。</p>
           </div>
-
-          <div className="player-frame">
-            <video
-              ref={videoRef} controls playsInline preload="metadata"
-              onLoadedMetadata={() => setIsReady(true)}
-              onError={() => { if (activeItem) setError('无法播放此媒体。检查地址、网络及视频编码格式。') }}
-              onRateChange={(event) => setSpeed(String(event.currentTarget.playbackRate))}
-              aria-label={activeItem ? `正在播放 ${activeItem.title}` : '视频播放区域'}
+          <form className="catalog-search" onSubmit={submitSearch}>
+            <Search size={19} />
+            <input
+              value={keyword}
+              onChange={(event) => {
+                setKeyword(event.target.value)
+                setVideos([])
+                setPage(1)
+                setLoading(true)
+              }}
+              placeholder="搜索片名、关键词..."
+              aria-label="搜索片名或关键词"
             />
-            {!activeItem && <div className="empty-player">
-              <div className="empty-player-mark"><Film size={27} strokeWidth={1.5} /></div>
-              <p>画面将在这里展开</p><span>粘贴播放链接，或打开本地视频</span>
-            </div>}
-            {activeItem && !isReady && !error && <div className="loading-indicator"><LoaderCircle size={18} /> 正在连接媒体源</div>}
-            {error && <div className="player-error" role="alert">{error}</div>}
-            <span className="player-corner">{activeItem && isHls(activeItem.url) ? 'HLS STREAM' : 'MEDIA SOURCE'}</span>
-          </div>
-
-          <div className="now-playing">
-            <div className="now-playing-title">
-              <span className="now-icon"><Radio size={16} /></span>
-              <div><span className="eyebrow">NOW PLAYING</span><strong title={activeItem?.title}>{activeItem?.title ?? '等待选择媒体'}</strong></div>
-            </div>
-            <div className="playback-tools">
-              {activeItem?.source === 'url' && <button className="tool-button" type="button" onClick={copyActiveUrl} title="复制播放地址" aria-label="复制播放地址">
-                {copied ? <Check size={17} /> : <ExternalLink size={17} />}<span>{copied ? '已复制' : '复制链接'}</span>
-              </button>}
-              <label className="speed-control" title="播放速度"><Clock3 size={15} />
-                <select aria-label="播放速度" value={speed} onChange={(event) => {
-                  const value = event.target.value
-                  setSpeed(value)
-                  if (videoRef.current) videoRef.current.playbackRate = Number(value)
-                }}>
-                  <option value="0.5">0.5x</option><option value="0.75">0.75x</option><option value="1">1x</option>
-                  <option value="1.25">1.25x</option><option value="1.5">1.5x</option><option value="2">2x</option>
-                </select>
-              </label>
-            </div>
-          </div>
-          <div className="source-note" id="player-help"><ShieldCheck size={15} /><span>播放内容直接来自你提供的地址；视频不会上传到此应用。</span></div>
+            {keyword && <button type="button" onClick={() => {
+              setKeyword('')
+              setQuery('')
+              setVideos([])
+              setPage(1)
+              setLoading(true)
+            }} aria-label="清除搜索"><X size={16} /></button>}
+            <kbd>ENTER</kbd>
+          </form>
         </section>
 
-        <aside className="queue-column" aria-label="播放列表">
-          <div className="queue-heading">
-            <div><div className="eyebrow">YOUR MEDIA <span>02 / QUEUE</span></div><h2>播放列表 <span className="queue-count">{playlist.length.toString().padStart(2, '0')}</span></h2></div>
-            <button className="icon-button" type="button" onClick={() => fileInputRef.current?.click()} title="打开本地视频" aria-label="打开本地视频"><Upload size={18} /></button>
-            <input ref={fileInputRef} type="file" accept="video/*" hidden onChange={(event) => {
-              addFile(event.target.files?.[0])
-              event.target.value = ''
-            }} />
+        <nav className="category-bar" aria-label="影视分类">
+          <span className="category-label">BROWSE BY</span>
+          <div className="category-list">
+            <button className={!selectedType ? 'category-tab is-selected' : 'category-tab'} type="button" onClick={() => changeCategory('')}>全部</button>
+            {categories.map((category) => <button
+              className={selectedType === String(category.type_id) ? 'category-tab is-selected' : 'category-tab'}
+              type="button"
+              key={category.type_id}
+              onClick={() => changeCategory(String(category.type_id))}
+            >{category.type_name}</button>)}
+          </div>
+        </nav>
+
+        <section className="catalog-section" aria-label="影视目录">
+          <div className="catalog-toolbar">
+            <div className="catalog-heading">
+              <div className="eyebrow"><Film size={13} /> {selectedCategory?.type_name || (query ? 'SEARCH RESULTS' : 'LATEST RELEASES')} <span>02 / LIBRARY</span></div>
+              <h2>{query ? `“${query}” 的搜索结果` : selectedCategory?.type_name || '正在热播'} <span className="result-count">{total ? `${total}+` : '—'}</span></h2>
+            </div>
+            <div className="filter-controls">
+              <span className="filter-label"><SlidersHorizontal size={14} /> 筛选</span>
+              {filterFields.map(({ key, label }) => {
+                const options = getFilterOptions(selectedCategory, key)
+                if (!options.length) return null
+                return <label className="filter-select" key={key}>
+                  <span className="sr-only">按{label}筛选</span>
+                  <select value={filters[key] || ''} onChange={(event) => changeFilter(key, event.target.value)}>
+                    <option value="">{label}</option>
+                    {options.map((option) => <option key={option} value={option}>{option}</option>)}
+                  </select>
+                </label>
+              })}
+              <label className="sort-select"><ArrowDownWideNarrow size={14} /><select aria-label="排序方式" value={sortBy} onChange={(event) => setSortBy(event.target.value as 'latest' | 'score')}><option value="latest">最新</option><option value="score">高分</option></select></label>
+              {hasActiveFilters && <button className="clear-filters" type="button" onClick={() => changeCategory(selectedType)}>清除筛选</button>}
+            </div>
           </div>
 
-          <form className="url-form" onSubmit={(event) => { event.preventDefault(); addUrl() }}>
-            <label className="url-input-wrap"><span className="sr-only">播放链接</span>
-              <input type="url" value={urlInput} onChange={(event) => setUrlInput(event.target.value)} placeholder="粘贴 .m3u8 或视频链接" aria-label="粘贴 .m3u8 或视频链接" />
-              {urlInput && <button className="clear-input" type="button" onClick={() => setUrlInput('')} title="清空链接" aria-label="清空链接"><X size={15} /></button>}
-            </label>
-            <button className="add-button" type="submit" title="添加到播放列表" aria-label="添加到播放列表"><Plus size={19} /></button>
-          </form>
+          {categoryError && <div className="catalog-message" role="alert">分类加载失败：{categoryError}</div>}
+          {listError && <div className="catalog-message" role="alert">影视列表加载失败：{listError}<button type="button" onClick={() => { setListError(''); setLoading(true); setPage(1) }}>重试</button></div>}
 
-          <div className="queue-actions">
-            <div className="queue-label"><ListVideo size={15} /><span>UP NEXT</span></div>
-            <label className="search-wrap"><Search size={14} /><input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="搜索列表" aria-label="搜索播放列表" /></label>
-          </div>
+          {loading && videos.length === 0 ? <div className="catalog-loading"><LoaderCircle size={22} /> 正在整理片单</div> : sortedVideos.length > 0 ? <div className="movie-grid">
+            {sortedVideos.map((video) => <button className="movie-card" key={video.vod_id} type="button" onClick={() => openDetail(video)}>
+              <span className="poster-wrap">
+                {video.vod_pic ? <img src={video.vod_pic} alt={`${video.vod_name} 海报`} loading="lazy" onError={(event) => { event.currentTarget.style.display = 'none' }} /> : <span className="poster-fallback"><Film size={28} /></span>}
+                <span className="poster-overlay"><span className="play-poster"><Play size={17} fill="currentColor" /></span></span>
+                {video.vod_remarks && <span className="poster-remarks">{video.vod_remarks}</span>}
+                {video.vod_score && <span className="poster-score"><Star size={11} fill="currentColor" /> {video.vod_score}</span>}
+              </span>
+              <span className="movie-info"><strong title={video.vod_name}>{video.vod_name}</strong><span>{video.vod_year || '年份未知'}<i />{selectedCategory?.type_name || '影视'}</span></span>
+            </button>)}
+          </div> : !loading && !listError && <div className="catalog-empty"><Film size={25} /><strong>{query ? '没有找到相关影视' : '这个筛选下暂无内容'}</strong><span>换个分类或关键词再试试。</span></div>}
 
-          <div className="playlist-list" role="list">
-            {visiblePlaylist.map((item, index) => <div className={`playlist-item${item.id === activeId ? ' is-active' : ''}`} key={item.id} role="listitem">
-              <button className="playlist-select" type="button" onClick={() => { setActiveId(item.id); setError('') }} aria-label={`播放 ${item.title}`}>
-                <span className="item-index">{String(index + 1).padStart(2, '0')}</span>
-                <span className="item-copy"><strong title={item.title}>{item.title}</strong><span>{item.source === 'file' ? '本地文件' : isHls(item.url) ? 'HLS STREAM' : 'VIDEO LINK'}</span></span>
-                <span className="item-play-state">{item.id === activeId ? <Radio size={15} /> : <Plus size={15} />}</span>
-              </button>
-              <button className="remove-button" type="button" onClick={() => removeItem(item)} title={`移除 ${item.title}`} aria-label={`移除 ${item.title}`}><Trash2 size={15} /></button>
-            </div>)}
-            {visiblePlaylist.length === 0 && <div className="empty-queue">
-              {filter ? <Search size={20} /> : <FileVideo2 size={22} />}
-              <strong>{filter ? '没有匹配的媒体' : '播放列表还是空的'}</strong>
-              <span>{filter ? '试试其他关键词' : '添加一个 HLS 地址开始播放'}</span>
-              {!filter && <button type="button" onClick={() => addUrl(demoStream)}>载入 HLS 示例 <ExternalLink size={13} /></button>}
-            </div>}
-          </div>
-
-          <div className="queue-footer">
-            <span><Check size={14} /> 播放链接保存在此设备</span>
-            <button type="button" onClick={() => {
-              playlist.filter((item) => item.source === 'file').forEach((item) => URL.revokeObjectURL(item.url))
-              setPlaylist([])
-              setActiveId(null)
-            }} disabled={playlist.length === 0}>清空列表</button>
-          </div>
-        </aside>
+          {loading && videos.length > 0 && <div className="load-more-progress"><LoaderCircle size={16} /> 正在加载下一页</div>}
+          {!loading && hasMore && videos.length > 0 && <button className="load-more" type="button" onClick={loadMore}>加载更多 <span>↓</span></button>}
+        </section>
       </main>
 
-      <footer className="app-footer"><span><span className="footer-mark">F</span> FRAME / PLAYBACK DESK</span><span>HLS READY <span className="footer-separator">·</span> BUILT FOR YOUR SCREEN</span></footer>
+      <footer className="app-footer"><span><span className="footer-mark">F</span> FRAME / VIDEO LIBRARY</span><span>播放内容由视频源提供 <span className="footer-separator">·</span> HLS READY</span></footer>
+
+      {selectedVodId !== null && <div className="detail-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeDetail() }}>
+        <section className="detail-panel" role="dialog" aria-modal="true" aria-label={detail?.vod_name || '影视详情'}>
+          <button className="detail-close" type="button" onClick={closeDetail} aria-label="关闭详情"><X size={20} /></button>
+          {detailLoading ? <div className="detail-loading"><LoaderCircle size={24} /> 正在加载详情</div> : detailError ? <div className="detail-loading" role="alert">{detailError}<button type="button" onClick={closeDetail}>返回片库</button></div> : detail && <>
+            <div className="detail-scroll">
+              {playing && <div className="detail-player-wrap">
+                <div className="detail-player-heading"><span><span className="live-dot" /> 正在播放</span><strong>{detail.vod_name} · {playing.name}</strong></div>
+                <div className="detail-video-frame">
+                  <video
+                    id="detail-player"
+                    controls
+                    autoPlay
+                    playsInline
+                    poster={detail.vod_pic || undefined}
+                    onLoadedMetadata={() => setPlayerReady(true)}
+                    onError={() => setPlayerError('当前线路播放失败，请尝试其他集数或播放源。')}
+                  />
+                  {!playerReady && !playerError && <div className="video-loading"><LoaderCircle size={19} /> 正在连接视频源</div>}
+                  {playerError && <div className="video-error" role="alert">{playerError}</div>}
+                </div>
+                <div className="detail-player-tools"><span>HLS / VIDEO</span><label>倍速<select value={speed} onChange={(event) => setSpeed(event.target.value)}><option value="0.5">0.5x</option><option value="0.75">0.75x</option><option value="1">1x</option><option value="1.25">1.25x</option><option value="1.5">1.5x</option><option value="2">2x</option></select></label></div>
+              </div>}
+
+              <div className="detail-hero">
+                <div className="detail-poster">{detail.vod_pic && <img src={detail.vod_pic} alt={`${detail.vod_name} 海报`} />}</div>
+                <div className="detail-copy">
+                  <div className="eyebrow">{detail.type?.type_name || selectedCategory?.type_name || 'VIDEO DETAIL'} <span>VOD / {detail.vod_year || '—'}</span></div>
+                  <h2>{detail.vod_name}</h2>
+                  <div className="detail-meta"><span>{detail.vod_year || '年份未知'}</span>{detail.vod_area && <><i /> <span>{detail.vod_area}</span></>}{detail.vod_score && <><i /> <span className="detail-rating"><Star size={13} fill="currentColor" /> {detail.vod_score}</span></>}{detail.vod_remarks && <><i /> <span>{detail.vod_remarks}</span></>}</div>
+                  {detail.vod_director && <p><b>导演</b>{detail.vod_director}</p>}
+                  {detail.vod_actor && <p><b>主演</b>{detail.vod_actor}</p>}
+                  <div className="detail-description">{plainText(detail.vod_content || detail.vod_blurb || '') || '暂无简介'}</div>
+                </div>
+              </div>
+
+              <section className="episode-section">
+                <div className="episode-heading"><div><div className="eyebrow">SELECT AN EPISODE <span>03 / PLAY</span></div><h3>选集播放 <span>{currentEpisodes.length} 集</span></h3></div></div>
+                {episodeSources.length > 1 && <div className="source-tabs" role="tablist" aria-label="播放源">{episodeSources.map((source, index) => <button className={selectedSource === index ? 'is-selected' : ''} type="button" role="tab" aria-selected={selectedSource === index} key={source.name} onClick={() => { setSelectedSource(index); setPlaying(null); setPlayerReady(false); setPlayerError('') }}>{source.name}</button>)}</div>}
+                {currentEpisodes.length > 0 ? <div className="episode-grid">{currentEpisodes.map((episode, index) => <button className={playing?.id === episode.id ? 'episode-button is-playing' : 'episode-button'} key={episode.id} type="button" onClick={() => playEpisode(episode)}><span>{episode.name}</span><Play size={13} fill="currentColor" /><span className="episode-number">{String(index + 1).padStart(2, '0')}</span></button>)}</div> : <div className="episode-empty">当前内容暂无可播放集数。</div>}
+              </section>
+            </div>
+          </>}
+        </section>
+      </div>}
     </div>
   )
 }
