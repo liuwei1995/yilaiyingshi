@@ -19,8 +19,14 @@
   "dependencies": {
     "@capacitor/android": "^8.5.3",
     "@capacitor/core": "^8.5.3",
+    "@capacitor/file-transfer": "^2.0.6",
+    "@capacitor/filesystem": "^8.1.5",
     "@capacitor/ios": "^8.5.3",
+    "@capnative/capacitor-chromecast": "^8.2.1",
+    "fast-xml-parser": "^5.11.2",
+    "hls-parser": "^0.16.1",
     "hls.js": "^1.7.3",
+    "jszip": "^3.10.2",
     "lucide-react": "^1.59.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
@@ -47,12 +53,30 @@
   },
   "main": "electron/main.cjs",
   "build": {
-    "appId": "com.frame.player",
-    "productName": "Frame Player",
-    "files": ["dist/**/*", "electron/**/*"],
-    "directories": {"output": "release"},
-    "linux": {"target": ["AppImage"], "category": "AudioVideo"},
-    "win": {"target": ["nsis"]},
-    "mac": {"target": ["dmg"]}
+    "appId": "com.xinaliu.livevideo",
+    "productName": "以来影视",
+    "files": [
+      "dist/**/*",
+      "electron/**/*"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "AudioVideo"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ]
+    }
   }
 }

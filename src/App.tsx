@@ -1,11 +1,17 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { Capacitor } from '@capacitor/core'
+import { Chromecast } from '@capnative/capacitor-chromecast'
 import type Hls from 'hls.js'
 import {
-  ArrowDownWideNarrow, Clapperboard, Film, LoaderCircle, Play,
-  Search, SlidersHorizontal, Sparkles, Star, X,
+  ArrowDownWideNarrow, Cast, Clapperboard, Download, DownloadCloud, Film,
+  LoaderCircle, Play, Search, SlidersHorizontal, Sparkles, Star, Trash2, X,
 } from 'lucide-react'
 import { fetchCategories, fetchVodDetail, fetchVodPage } from './api'
 import type { VodCategory, VodDetail, VodListItem, VodPlaySource } from './api'
+import { discoverDlna, sendToDlna } from './dlna'
+import type { DlnaDevice } from './dlna'
+import { deleteOfflineMedia, downloadMedia, getOfflineUrl, readOfflineMedia } from './offline'
+import type { OfflineMedia } from './offline'
 import './App.css'
 
 type FilterKey = 'area' | 'year' | 'class' | 'lang'
@@ -76,6 +82,14 @@ function App() {
   const [playerError, setPlayerError] = useState('')
   const [playerReady, setPlayerReady] = useState(false)
   const [speed, setSpeed] = useState('1')
+  const [offlineMedia, setOfflineMedia] = useState<OfflineMedia[]>(readOfflineMedia)
+  const [showOffline, setShowOffline] = useState(false)
+  const [downloadingId, setDownloadingId] = useState<string | null>(null)
+  const [downloadMessage, setDownloadMessage] = useState('')
+  const [castMessage, setCastMessage] = useState('')
+  const [isScanningDlna, setIsScanningDlna] = useState(false)
+  const [dlnaDevices, setDlnaDevices] = useState<DlnaDevice[]>([])
+  const pendingCast = useRef<Episode | null>(null)
 
   const selectedCategory = categories.find((category) => String(category.type_id) === selectedType)
   const episodeSources = detail ? getEpisodeSources(detail) : []
@@ -168,6 +182,31 @@ function App() {
     if (video) video.playbackRate = Number(speed)
   }, [speed])
 
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return
+    let listener: { remove: () => Promise<void> } | undefined
+    let disposed = false
+    void Chromecast.initialize({ receiverApplicationId: 'CC1AD845' })
+      .then(async () => {
+        if (disposed) return
+        listener = await Chromecast.addListener('sessionStateChanged', async ({ state }) => {
+          const media = pendingCast.current
+          if (state !== 'connected' || !media) return
+          pendingCast.current = null
+          try {
+            await Chromecast.loadMedia({ url: media.url })
+          } catch (error) {
+            setCastMessage(error instanceof Error ? error.message : '投屏播放失败。')
+          }
+        })
+      })
+      .catch((error: unknown) => setCastMessage(error instanceof Error ? error.message : '投屏服务初始化失败。'))
+    return () => {
+      disposed = true
+      void listener?.remove()
+    }
+  }, [])
+
   function changeCategory(typeId: string) {
     setSelectedType(typeId)
     setFilters({})
@@ -224,14 +263,110 @@ function App() {
     setPage((current) => current + 1)
   }
 
+  async function castEpisode(episode: Episode) {
+    setCastMessage('')
+    try {
+      if (window.yilaiDesktop || Capacitor.getPlatform() === 'android') {
+        setIsScanningDlna(true)
+        try {
+          const devices = await discoverDlna()
+          setDlnaDevices(devices)
+          if (devices.length === 0) setCastMessage('没有发现 DLNA 设备，请确认设备已连接同一 Wi-Fi。')
+        } finally {
+          setIsScanningDlna(false)
+        }
+        return
+      }
+      if (!Capacitor.isNativePlatform()) {
+        await systemCast()
+        return
+      }
+      if (await Chromecast.isConnected()) {
+        await Chromecast.loadMedia({ url: episode.url })
+      } else {
+        pendingCast.current = episode
+        await Chromecast.show()
+      }
+    } catch (error) {
+      setCastMessage(error instanceof Error ? error.message : '投屏失败，请重试。')
+    }
+  }
+
+  async function systemCast() {
+    const video = document.querySelector<HTMLVideoElement>('#detail-player') as (HTMLVideoElement & {
+      remote?: { prompt: () => Promise<void> }
+      webkitShowPlaybackTargetPicker?: () => void
+    }) | null
+    if (Capacitor.getPlatform() === 'ios' && video?.webkitShowPlaybackTargetPicker) {
+      video.webkitShowPlaybackTargetPicker()
+      return
+    }
+    if (video?.remote?.prompt) {
+      await video.remote.prompt()
+      return
+    }
+    setCastMessage('当前浏览器不支持系统投屏；请使用支持 AirPlay 或 Remote Playback 的浏览器。')
+  }
+
+  async function playOnDlna(device: DlnaDevice, episode: Episode) {
+    try {
+      await sendToDlna(device, episode.url, `${detail?.vod_name || ''} ${episode.name}`.trim())
+      setCastMessage(`已发送到 ${device.name}`)
+      setDlnaDevices([])
+    } catch (error) {
+      setCastMessage(error instanceof Error ? error.message : 'DLNA 投屏失败。')
+    }
+  }
+
+  async function downloadEpisode(episode: Episode) {
+    setDownloadingId(episode.id)
+    setDownloadMessage('正在下载并保存到本地…')
+    try {
+      const item = await downloadMedia(episode.url, `${detail?.vod_name || '视频'}-${episode.name}`)
+      if (item) setOfflineMedia(readOfflineMedia())
+      setDownloadMessage(item ? '已保存到本机离线库。' : '浏览器下载已开始。')
+    } catch (error) {
+      setDownloadMessage(error instanceof Error ? error.message : '下载失败，请检查网络和跨域设置。')
+    } finally {
+      setDownloadingId(null)
+    }
+  }
+
+  async function playOffline(item: OfflineMedia) {
+    try {
+      const url = await getOfflineUrl(item)
+      if (!url) throw new Error('浏览器下载文件不支持在应用内离线播放。')
+      setDetail({ vod_id: item.id, vod_name: item.title, vod_pic: '', vod_content: '保存在本机的离线媒体。' })
+      setSelectedVodId(item.id)
+      setShowOffline(false)
+      playEpisode({ id: `offline-${item.id}`, name: '离线播放', url })
+    } catch (error) {
+      setDownloadMessage(error instanceof Error ? error.message : '离线文件打开失败。')
+    }
+  }
+
+  async function removeOffline(item: OfflineMedia) {
+    try {
+      await deleteOfflineMedia(item)
+      setOfflineMedia(readOfflineMedia())
+    } catch (error) {
+      setDownloadMessage(error instanceof Error ? error.message : '删除离线文件失败。')
+    }
+  }
+
   return (
     <div className="app-shell">
       <header className="topbar">
-        <a className="brand" href="#home" aria-label="Frame 影视首页">
+        <a className="brand" href="#home" aria-label="以来影视首页">
           <span className="brand-mark"><Clapperboard size={19} strokeWidth={2.1} /></span>
-          <span className="brand-name">FRAME<span>/</span>PLAY</span>
+          <span className="brand-name">以来影视</span>
         </a>
-        <span className="platform-badge"><span className="live-dot" /> VIDEO LIBRARY</span>
+        <div className="header-actions">
+          <button className="offline-trigger" type="button" onClick={() => { setOfflineMedia(readOfflineMedia()); setShowOffline(true) }} title="打开离线媒体库">
+            <DownloadCloud size={16} /><span>离线库</span><b>{offlineMedia.length}</b>
+          </button>
+          <span className="platform-badge"><span className="live-dot" /> VIDEO LIBRARY</span>
+        </div>
       </header>
 
       <main className="library" id="home">
@@ -322,7 +457,7 @@ function App() {
         </section>
       </main>
 
-      <footer className="app-footer"><span><span className="footer-mark">F</span> FRAME / VIDEO LIBRARY</span><span>播放内容由视频源提供 <span className="footer-separator">·</span> HLS READY</span></footer>
+      <footer className="app-footer"><span><span className="footer-mark">影</span> 以来影视</span><span>播放内容由视频源提供 <span className="footer-separator">·</span> HLS READY</span></footer>
 
       {selectedVodId !== null && <div className="detail-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeDetail() }}>
         <section className="detail-panel" role="dialog" aria-modal="true" aria-label={detail?.vod_name || '影视详情'}>
@@ -345,6 +480,15 @@ function App() {
                   {playerError && <div className="video-error" role="alert">{playerError}</div>}
                 </div>
                 <div className="detail-player-tools"><span>HLS / VIDEO</span><label>倍速<select value={speed} onChange={(event) => setSpeed(event.target.value)}><option value="0.5">0.5x</option><option value="0.75">0.75x</option><option value="1">1x</option><option value="1.25">1.25x</option><option value="1.5">1.5x</option><option value="2">2x</option></select></label></div>
+                <div className="media-actions">
+                  {playing && <button type="button" onClick={() => void castEpisode(playing)}><Cast size={16} />{isScanningDlna ? '搜索设备…' : '投屏'}</button>}
+                  {playing && !playing.id.startsWith('offline-') && <button type="button" disabled={downloadingId === playing.id} onClick={() => void downloadEpisode(playing)}><Download size={16} />{downloadingId === playing.id ? '下载中…' : '下载本集'}</button>}
+                  {playing && <button type="button" onClick={() => void systemCast()}><Cast size={16} />系统/AirPlay</button>}
+                  <button type="button" onClick={() => { setOfflineMedia(readOfflineMedia()); setShowOffline(true) }}><DownloadCloud size={16} />离线库</button>
+                </div>
+                {castMessage && <div className="media-notice" role="status">{castMessage}</div>}
+                {dlnaDevices.length > 0 && <div className="dlna-picker"><strong>选择 DLNA 设备</strong>{dlnaDevices.map((device) => <button key={device.id} type="button" onClick={() => playing && void playOnDlna(device, playing)}>{device.name}<Play size={13} /></button>)}</div>}
+                {downloadMessage && <div className="media-notice" role="status">{downloadMessage}</div>}
               </div>}
 
               <div className="detail-hero">
@@ -362,10 +506,24 @@ function App() {
               <section className="episode-section">
                 <div className="episode-heading"><div><div className="eyebrow">SELECT AN EPISODE <span>03 / PLAY</span></div><h3>选集播放 <span>{currentEpisodes.length} 集</span></h3></div></div>
                 {episodeSources.length > 1 && <div className="source-tabs" role="tablist" aria-label="播放源">{episodeSources.map((source, index) => <button className={selectedSource === index ? 'is-selected' : ''} type="button" role="tab" aria-selected={selectedSource === index} key={source.name} onClick={() => { setSelectedSource(index); setPlaying(null); setPlayerReady(false); setPlayerError('') }}>{source.name}</button>)}</div>}
-                {currentEpisodes.length > 0 ? <div className="episode-grid">{currentEpisodes.map((episode, index) => <button className={playing?.id === episode.id ? 'episode-button is-playing' : 'episode-button'} key={episode.id} type="button" onClick={() => playEpisode(episode)}><span>{episode.name}</span><Play size={13} fill="currentColor" /><span className="episode-number">{String(index + 1).padStart(2, '0')}</span></button>)}</div> : <div className="episode-empty">当前内容暂无可播放集数。</div>}
+                {currentEpisodes.length > 0 ? <div className="episode-grid">{currentEpisodes.map((episode, index) => <div className="episode-entry" key={episode.id}>
+                  <button className={playing?.id === episode.id ? 'episode-button is-playing' : 'episode-button'} type="button" onClick={() => playEpisode(episode)}><span>{episode.name}</span><Play size={13} fill="currentColor" /><span className="episode-number">{String(index + 1).padStart(2, '0')}</span></button>
+                  <button className="episode-download" type="button" title={`下载${episode.name}`} aria-label={`下载${episode.name}`} disabled={downloadingId === episode.id} onClick={() => void downloadEpisode(episode)}><Download size={14} /></button>
+                </div>)}</div> : <div className="episode-empty">当前内容暂无可播放集数。</div>}
               </section>
             </div>
           </>}
+        </section>
+      </div>}
+
+      {showOffline && <div className="detail-backdrop offline-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowOffline(false) }}>
+        <section className="offline-panel" role="dialog" aria-modal="true" aria-label="离线媒体库">
+          <div className="offline-heading"><div><div className="eyebrow">ON THIS DEVICE <span>OFFLINE LIBRARY</span></div><h2>离线媒体 <span>{offlineMedia.length}</span></h2></div><button className="detail-close" type="button" onClick={() => setShowOffline(false)} aria-label="关闭离线媒体库"><X size={20} /></button></div>
+          {downloadMessage && <div className="media-notice" role="status">{downloadMessage}</div>}
+          {offlineMedia.length ? <div className="offline-list">{offlineMedia.map((item) => <div className="offline-item" key={item.id}>
+            <button className="offline-play" type="button" onClick={() => void playOffline(item)}><Play size={15} fill="currentColor" /><span><strong>{item.title}</strong><small>{item.kind === 'hls' ? 'HLS 离线分集' : '视频文件'} · {new Date(item.createdAt).toLocaleDateString()}</small></span></button>
+            <button className="offline-delete" type="button" onClick={() => void removeOffline(item)} aria-label={`删除${item.title}`} title="删除下载"><Trash2 size={16} /></button>
+          </div>)}</div> : <div className="offline-empty"><DownloadCloud size={25} /><strong>还没有离线视频</strong><span>在影视详情中下载单集后，会保存在这里。</span></div>}
         </section>
       </div>}
     </div>

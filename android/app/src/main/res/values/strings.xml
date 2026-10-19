@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">Frame Player</string>
-    <string name="title_activity_main">Frame Player</string>
-    <string name="package_name">com.frame.player</string>
-    <string name="custom_url_scheme">com.frame.player</string>
+    <string name="app_name">以来影视</string>
+    <string name="title_activity_main">以来影视</string>
+    <string name="package_name">com.xinaliu.livevideo</string>
+    <string name="custom_url_scheme">com.xinaliu.livevideo</string>
 </resources>

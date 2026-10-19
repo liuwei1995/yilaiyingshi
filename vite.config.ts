@@ -26,8 +26,8 @@ export default defineConfig(({ mode }) => {
       ...(!isDesktopBuild ? [VitePWA({
         registerType: 'autoUpdate',
         manifest: {
-          name: 'Frame Player',
-          short_name: 'Frame',
+          name: '以来影视',
+          short_name: '以来影视',
           description: '跨平台 HLS 视频播放器',
           theme_color: '#f8f8f2',
           background_color: '#f8f8f2',
