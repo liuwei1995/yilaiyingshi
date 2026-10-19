@@ -6,13 +6,15 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:testing": "tsc -b && vite build --mode testing",
     "lint": "eslint .",
     "preview": "vite preview",
     "cap:sync": "npm run build && cap sync",
     "cap:android": "npm run cap:sync && cap open android",
     "cap:ios": "npm run cap:sync && cap open ios",
     "electron:dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && electron ./electron/main.cjs\"",
-    "desktop:build": "npm run build && electron-builder"
+    "desktop:build": "tsc -b && vite build --mode desktop-production && electron-builder",
+    "desktop:build:testing": "tsc -b && vite build --mode desktop-testing && electron-builder"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.3",

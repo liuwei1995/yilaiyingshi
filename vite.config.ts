@@ -7,30 +7,35 @@ const forwardedHost = process.env.CODESPACE_NAME && process.env.GITHUB_CODESPACE
   : undefined
 
 // https://vite.dev/config/
-export default defineConfig({
-  server: {
-    allowedHosts: forwardedHost ? [forwardedHost] : [],
-    proxy: {
-      '/api.php': {
-        target: 'http://frp.xinaliu.com',
-        changeOrigin: true,
+export default defineConfig(({ mode }) => {
+  const isDesktopBuild = mode.startsWith('desktop-')
+
+  return {
+    base: isDesktopBuild ? './' : '/',
+    server: {
+      allowedHosts: forwardedHost ? [forwardedHost] : [],
+      proxy: {
+        '/api.php': {
+          target: 'http://frp.xinaliu.com',
+          changeOrigin: true,
+        },
       },
     },
-  },
-  plugins: [
-    react(),
-    VitePWA({
-      registerType: 'autoUpdate',
-      manifest: {
-        name: 'Frame Player',
-        short_name: 'Frame',
-        description: '跨平台 HLS 视频播放器',
-        theme_color: '#f8f8f2',
-        background_color: '#f8f8f2',
-        display: 'standalone',
-        start_url: '/',
-        icons: [{ src: '/frame-mark.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any maskable' }],
-      },
-    }),
-  ],
+    plugins: [
+      react(),
+      ...(!isDesktopBuild ? [VitePWA({
+        registerType: 'autoUpdate',
+        manifest: {
+          name: 'Frame Player',
+          short_name: 'Frame',
+          description: '跨平台 HLS 视频播放器',
+          theme_color: '#f8f8f2',
+          background_color: '#f8f8f2',
+          display: 'standalone',
+          start_url: '/',
+          icons: [{ src: '/frame-mark.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any maskable' }],
+        },
+      })] : []),
+    ],
+  }
 })
